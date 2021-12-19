@@ -40,7 +40,7 @@ void update() {
 }
 
 void save() {
-    Serial.begin(115200);
+    digitalWrite(LED_BUILTIN, HIGH);
 
     lastChangeSaved = true;
 
@@ -49,9 +49,17 @@ void save() {
     for (uint8_t i = 0; i < 3; ++i) {
         EEPROM.put<uint8_t>(sizeof(uint32_t) + i, value[i]);
     }
+
+    digitalWrite(LED_BUILTIN, LOW);
 }
 
 void setup() {
+    // Internal LED to show "doing something"
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    Serial.begin(115200);
+
     // LEDs
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_GREEN, OUTPUT);
@@ -76,6 +84,7 @@ void setup() {
     }
 
     update();
+    digitalWrite(LED_BUILTIN, LOW);
 }
 
 void loop() {
@@ -95,6 +104,8 @@ void loop() {
     uint8_t* currentValue = value + currentMode;
 
     if (digitalRead(PIN_BUTTON_UP) == LOW) {
+        digitalWrite(LED_BUILTIN, HIGH);
+
         uint8_t maxChange = 255 - *currentValue;
 
         if (maxChange < changeValue) {
@@ -105,6 +116,8 @@ void loop() {
 
         update();
     } else if (digitalRead(PIN_BUTTON_DOWN) == LOW) {
+        digitalWrite(LED_BUILTIN, HIGH);
+
         uint8_t maxChange = *currentValue;
 
         if (maxChange < changeValue) {
@@ -115,6 +128,7 @@ void loop() {
 
         update();
     } else {
+        digitalWrite(LED_BUILTIN, LOW);
         unusedMillis = 0;
     }
 
