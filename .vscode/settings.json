@@ -1,0 +1,8 @@
+{
+    "C_Cpp.clang_format_fallbackStyle": "{ BasedOnStyle: Google, IndentWidth: 4, ColumnLimit: 100, PointerAlignment: Right, Cpp11BracedListStyle: true, SpacesBeforeTrailingComments: 3, AlignEscapedNewlines: Left, AllowAllArgumentsOnNextLine: true,AllowAllParametersOfDeclarationOnNextLine: true,   }",
+    "editor.formatOnSave": true,
+    "cSpell.words": [
+        "EEPROM",
+        "steroido"
+    ]
+}
