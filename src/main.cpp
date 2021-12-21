@@ -2,6 +2,7 @@
 
 #include "EEPROM.h"
 #include "Ports.h"
+#include "Steroido.h"
 
 // ms it takes to change by one (255 * this to get time from 0% - 100% brightness)
 #define MS_PER_CHANGE 10
@@ -10,47 +11,121 @@
 #define TIME_TO_SAVE 5000
 
 uint8_t ports[] = {PIN_LED_RED, PIN_LED_GREEN, PIN_LED_BLUE};
-uint8_t value[] = {255, 255, 255};
 
-enum mode_t : uint8_t {
-    MODE_RED = 0,
-    MODE_GREEN = 1,
-    MODE_BLUE = 2,
-};
+// The values currently shown
+uint8_t actualValues[] = {255, 255, 255};
 
-mode_t currentMode = MODE_RED;
+// The values that should be shown right now
+uint8_t desiredValues[] = {255, 255, 255};
 
-bool lastChangeSaved = true;
-unsigned long lastChange = 0;
+// For value calculation
 unsigned long unusedMillis = 0;
+bool fade = false;
+unsigned long fadeSpeed = MS_PER_CHANGE;
+bool desiredReached = true;
 
+// For EEPROM
 const uint32_t magicValue = 0xAFFEFEFA;
 
+// For up/down debounce
+DelayedSwitch upBtn;
+DelayedSwitch downBtn;
+
+enum selector_t : uint8_t {
+    SELECT_RED = 0,
+    SELECT_GREEN = 1,
+    SELECT_BLUE = 2,
+    SELECT_FADE = 3,
+};
+
+selector_t currentSelector = SELECT_RED;
+
 void update() {
+    // Update actual values to desired values
+    unusedMillis += millis();
+    unsigned long changeValue = unusedMillis / fadeSpeed;
+    unusedMillis -= changeValue * fadeSpeed;
+
+    desiredReached = true;
     for (uint8_t i = 0; i < 3; ++i) {
-        analogWrite(ports[i], value[i]);
-        Serial.print(value[i]);
+        // TODO implement better fade to reach all colors desired state at same time
+        uint8_t* desiredValue = desiredValues + i;
+        uint8_t* actualValue = actualValues + i;
+
+        if (*desiredValue > *actualValue) {
+            desiredReached = false;
+
+            // -> Fade up
+            uint8_t maxVal = *desiredValue - *actualValue;
+            if (maxVal < changeValue) {
+                *actualValue = *desiredValue;
+            } else {
+                *actualValue += changeValue;
+            }
+        } else if (*desiredValue < *actualValue) {
+            desiredReached = false;
+
+            // -> Fade down
+            uint8_t maxVal = *actualValue - *desiredValue;
+            if (maxVal < changeValue) {
+                *actualValue = *desiredValue;
+            } else {
+                *actualValue -= changeValue;
+            }
+        }
+    }
+
+    // Set (and print) actual values
+    for (uint8_t i = 0; i < 3; ++i) {
+        analogWrite(ports[i], actualValues[i]);
+        Serial.print(actualValues[i]);
         Serial.write('\t');
     }
 
     Serial.write('\n');
 
-    lastChange = millis();
-    lastChangeSaved = false;
-}
-
-void save() {
-    digitalWrite(LED_BUILTIN, HIGH);
-
-    lastChangeSaved = true;
-
-    EEPROM.put<uint32_t>(0, magicValue);
-
+    // Print desired values
     for (uint8_t i = 0; i < 3; ++i) {
-        EEPROM.put<uint8_t>(sizeof(uint32_t) + i, value[i]);
+        Serial.print(desiredValues[i]);
+        Serial.write('\t');
     }
 
-    digitalWrite(LED_BUILTIN, LOW);
+    Serial.write('\n');
+}
+
+void calcFade() {
+    // -> not implemented yet
+}
+
+void currentIsDesired() {
+    desiredReached = true;
+
+    for (uint8_t i = 0; i < 3; ++i) {
+        desiredValues[i] = actualValues[i];
+    }
+}
+
+void autosave() {
+    unsigned long lastSave = 0;
+
+    if ((millis() - lastSave) >= TIME_TO_SAVE) {
+        digitalWrite(LED_BUILTIN, HIGH);
+
+        lastSave = millis();
+
+        EEPROM.put<uint32_t>(0, magicValue);
+        uint8_t offset = sizeof(uint32_t);
+
+        EEPROM.put<uint8_t>(offset, currentSelector);
+        offset += sizeof(uint8_t);
+
+        for (uint8_t i = 0; i < 3; ++i) {
+            EEPROM.put<uint8_t>(offset + i, actualValues[i]);
+            EEPROM.put<uint8_t>(offset + 3 + i, desiredValues[i]);
+        }
+
+        digitalWrite(LED_BUILTIN, LOW);
+    }
 }
 
 void setup() {
@@ -69,73 +144,82 @@ void setup() {
     pinMode(PIN_BUTTON_RED, INPUT_PULLUP);
     pinMode(PIN_BUTTON_GREEN, INPUT_PULLUP);
     pinMode(PIN_BUTTON_BLUE, INPUT_PULLUP);
+    pinMode(PIN_BUTTON_FADE, INPUT_PULLUP);
 
     pinMode(PIN_BUTTON_UP, INPUT_PULLUP);
     pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP);
 
     // Read old values from EEPROM
     uint32_t magic = 0;
-    EEPROM.get(0, magic);
+    EEPROM.get<uint32_t>(0, magic);
+    uint8_t offset = sizeof(uint32_t);
 
     if (magic == magicValue) {
+        EEPROM.get<uint8_t>(offset, (uint8_t&)currentSelector);
+        offset += sizeof(uint8_t);
+
         for (uint8_t i = 0; i < 3; ++i) {
-            EEPROM.get<uint8_t>(sizeof(uint32_t) + i, value[i]);
+            EEPROM.get<uint8_t>(offset + i, actualValues[i]);
+            EEPROM.get<uint8_t>(offset + 3 + i, desiredValues[i]);
         }
     }
 
-    update();
+    desiredReached = true;
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (desiredValues[i] != actualValues[i]) {
+            desiredReached = false;
+            break;
+        }
+    }
+
+    upBtn.setEnableTime(100);
+    downBtn.setEnableTime(100);
+    upBtn.setDisableTime(50);
+    downBtn.setDisableTime(50);
+
     digitalWrite(LED_BUILTIN, LOW);
 }
+
+// Vars for loop
+bool upState;
+bool downState;
 
 void loop() {
     // First, set mode by button pressed
     if (digitalRead(PIN_BUTTON_RED) == LOW) {
-        currentMode = MODE_RED;
+        currentSelector = SELECT_RED;
     } else if (digitalRead(PIN_BUTTON_GREEN) == LOW) {
-        currentMode = MODE_GREEN;
+        currentSelector = SELECT_GREEN;
     } else if (digitalRead(PIN_BUTTON_BLUE) == LOW) {
-        currentMode = MODE_BLUE;
+        currentSelector = SELECT_BLUE;
+    } else if (digitalRead(PIN_BUTTON_FADE) == LOW) {
+        currentSelector = SELECT_FADE;
+    } else {
+        goto done;
     }
+
+    // Debounce up/down
+    upState = upBtn.set(digitalRead(PIN_BUTTON_UP) == LOW);
+    downState = downBtn.set(digitalRead(PIN_BUTTON_DOWN) == LOW);
 
     // Second, check up/down buttons
-    unusedMillis += millis();
-    unsigned long changeValue = unusedMillis / MS_PER_CHANGE;
-    unusedMillis -= changeValue * MS_PER_CHANGE;
-    uint8_t* currentValue = value + currentMode;
+    if (currentSelector < SELECT_FADE) {
+        fadeSpeed = MS_PER_CHANGE;
 
-    if (digitalRead(PIN_BUTTON_UP) == LOW) {
-        digitalWrite(LED_BUILTIN, HIGH);
-
-        uint8_t maxChange = 255 - *currentValue;
-
-        if (maxChange < changeValue) {
-            *currentValue = 255;
+        if (upState) {
+            desiredValues[currentSelector] = 255;
+        } else if (downState) {
+            desiredValues[currentSelector] = 0;
         } else {
-            *currentValue += changeValue;
+            currentIsDesired();
         }
-
-        update();
-    } else if (digitalRead(PIN_BUTTON_DOWN) == LOW) {
-        digitalWrite(LED_BUILTIN, HIGH);
-
-        uint8_t maxChange = *currentValue;
-
-        if (maxChange < changeValue) {
-            *currentValue = 0;
-        } else {
-            *currentValue -= changeValue;
-        }
-
-        update();
     } else {
-        digitalWrite(LED_BUILTIN, LOW);
-        unusedMillis = 0;
+        // TODO Fade up/down handling
     }
 
-    // And check for save need
-    if (!lastChangeSaved) {
-        if ((millis() - lastChange) >= TIME_TO_SAVE) {
-            save();
-        }
-    }
+done:
+    if (fade) calcFade();
+
+    update();
+    autosave();
 }
