@@ -20,7 +20,6 @@ uint8_t desiredValues[] = {255, 255, 255};
 
 // For value calculation
 unsigned long unusedMillis = 0;
-bool fade = false;
 unsigned long fadeSpeed = MS_PER_CHANGE;
 bool desiredReached = true;
 
@@ -40,9 +39,17 @@ enum selector_t : uint8_t {
 
 selector_t currentSelector = SELECT_RED;
 
+bool printActual = false;
+bool printDesired = false;
+
 void update() {
+    static unsigned long delta = 0;
+
+    unsigned long oldDelta = delta;
+    delta = millis();
+
     // Update actual values to desired values
-    unusedMillis += millis();
+    unusedMillis += delta - oldDelta;
     unsigned long changeValue = unusedMillis / fadeSpeed;
     unusedMillis -= changeValue * fadeSpeed;
 
@@ -78,19 +85,24 @@ void update() {
     // Set (and print) actual values
     for (uint8_t i = 0; i < 3; ++i) {
         analogWrite(ports[i], actualValues[i]);
-        Serial.print(actualValues[i]);
-        Serial.write('\t');
+
+        if (printActual) {
+            Serial.print(actualValues[i]);
+            Serial.write('\t');
+        }
     }
 
-    Serial.write('\n');
+    if (printActual) Serial.write('\n');
 
     // Print desired values
-    for (uint8_t i = 0; i < 3; ++i) {
-        Serial.print(desiredValues[i]);
-        Serial.write('\t');
-    }
+    if (printDesired) {
+        for (uint8_t i = 0; i < 3; ++i) {
+            Serial.print(desiredValues[i]);
+            Serial.write('\t');
+        }
 
-    Serial.write('\n');
+        Serial.write('\n');
+    }
 }
 
 void calcFade() {
@@ -106,7 +118,7 @@ void currentIsDesired() {
 }
 
 void autosave() {
-    unsigned long lastSave = 0;
+    static unsigned long lastSave = 0;
 
     if ((millis() - lastSave) >= TIME_TO_SAVE) {
         digitalWrite(LED_BUILTIN, HIGH);
@@ -124,7 +136,96 @@ void autosave() {
             EEPROM.put<uint8_t>(offset + 3 + i, desiredValues[i]);
         }
 
+        Serial.println("Save");
+
         digitalWrite(LED_BUILTIN, LOW);
+    }
+}
+
+bool getNumFromChar(uint8_t& num, char charToConv) {
+    if (charToConv >= '0' && charToConv <= '9') {
+        num = charToConv - '0';
+        return true;
+    }
+
+    return false;
+}
+
+void manageSerial() {
+    static bool nextIsNum = false;
+    static uint8_t numIndex;
+    static uint8_t num;
+    static uint8_t commandIndex;
+
+    if (Serial.available()) {
+        int currentChar = Serial.read();
+
+        if (currentChar >= 0) {
+            switch (currentChar) {
+                case 'a':
+                case 'A':
+                    printActual = !printActual;
+                    break;
+
+                case 'd':
+                case 'D':
+                    printDesired = !printDesired;
+                    break;
+
+                case 'r':
+                case 'R':
+                    numIndex = 0;
+                    num = 0;
+                    commandIndex = SELECT_RED;
+                    nextIsNum = true;
+                    break;
+
+                case 'g':
+                case 'G':
+                    numIndex = 0;
+                    num = 0;
+                    commandIndex = SELECT_GREEN;
+                    nextIsNum = true;
+                    break;
+
+                case 'b':
+                case 'B':
+                    numIndex = 0;
+                    num = 0;
+                    commandIndex = SELECT_BLUE;
+                    nextIsNum = true;
+                    break;
+
+                default:
+                    if (nextIsNum) {
+                        uint8_t currentNum;
+
+                        if (getNumFromChar(currentNum, currentChar)) {
+                            num *= 10;
+                            num += currentNum;
+
+                            if (++numIndex == 3) {
+                                nextIsNum = false;
+                                desiredValues[commandIndex] = num;
+                                desiredReached = false;
+
+                                Serial.print("Set ");
+                                Serial.print(commandIndex);
+                                Serial.print(" to ");
+                                Serial.println(num);
+                            }
+                        } else {
+                            Serial.println("Not a number (0 - 9)!");
+                            nextIsNum = false;
+                        }
+                    } else {
+                        Serial.println("Got wrong command");
+                    }
+                    break;
+            }
+        } else {
+            Serial.println("Got strange command");
+        }
     }
 }
 
@@ -160,8 +261,25 @@ void setup() {
 
         for (uint8_t i = 0; i < 3; ++i) {
             EEPROM.get<uint8_t>(offset + i, actualValues[i]);
-            EEPROM.get<uint8_t>(offset + 3 + i, desiredValues[i]);
+            Serial.print(actualValues[i]);
+            Serial.write('\t');
         }
+
+        offset += 3;
+        Serial.write('\n');
+
+        for (uint8_t i = 0; i < 3; ++i) {
+            EEPROM.get<uint8_t>(offset + i, desiredValues[i]);
+            Serial.print(desiredValues[i]);
+            Serial.write('\t');
+        }
+
+        Serial.print("\nSelector: ");
+        Serial.println(currentSelector);
+
+        Serial.println("Saved light loaded");
+    } else {
+        Serial.println("First turn on :)");
     }
 
     desiredReached = true;
@@ -194,13 +312,30 @@ void loop() {
         currentSelector = SELECT_BLUE;
     } else if (digitalRead(PIN_BUTTON_FADE) == LOW) {
         currentSelector = SELECT_FADE;
-    } else {
-        goto done;
     }
 
     // Debounce up/down
+    bool oldUpState = upState;
+    bool oldDownState = downState;
+
     upState = upBtn.set(digitalRead(PIN_BUTTON_UP) == LOW);
     downState = downBtn.set(digitalRead(PIN_BUTTON_DOWN) == LOW);
+
+    if (upState != oldUpState) {
+        if (upState) {
+            Serial.println("-> Up");
+        } else {
+            Serial.println("<- Up");
+        }
+    }
+
+    if (downState != oldDownState) {
+        if (downState) {
+            Serial.println("-> Down");
+        } else {
+            Serial.println("<- Down");
+        }
+    }
 
     // Second, check up/down buttons
     if (currentSelector < SELECT_FADE) {
@@ -211,15 +346,17 @@ void loop() {
         } else if (downState) {
             desiredValues[currentSelector] = 0;
         } else {
-            currentIsDesired();
+            if ((upState != oldUpState) || downState != oldDownState) {
+                // Only if released -> To fade if set over Serial
+                currentIsDesired();
+            }
         }
     } else {
         // TODO Fade up/down handling
+        calcFade();
     }
 
-done:
-    if (fade) calcFade();
-
+    manageSerial();
     update();
     autosave();
 }
