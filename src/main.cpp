@@ -16,6 +16,12 @@
 // ms to wait after change to save it
 #define TIME_TO_SAVE 5000
 
+// This + all data written to eeprom should NOT exceed the max eeprom size!
+#define EEPROM_MAX_OFFSET 1000
+
+// Time after continuous running and the offset will be changed
+#define EEPROM_OFFSET_CHANGE_TIME 600000   // ms -> 600 s -> 10m
+
 // Set if a predefined color list should be used or a random Color should be generated each
 // change
 //#define USE_RANDOM_FADE_STD
@@ -45,7 +51,8 @@ bool useRandom = false;
 #endif
 
 // For EEPROM
-const uint32_t magicValue = 0xAFFEFEFE;
+const uint32_t magicValue = 0xAFFEFEFF;
+uint16_t eepromOffset = 0;
 
 // For up/down debounce
 DelayedSwitch upBtn;
@@ -190,6 +197,9 @@ void autosave() {
     /*
         Saving (bytes, type, value):
         4   uint32_t    magicValue
+        2   uint16_t    offset
+
+        Next is offset + ...
         1   uint8_t     currentSelector
         4   u long      fadeSpeed
         3   uint8_t[3]  actualValues
@@ -197,14 +207,34 @@ void autosave() {
     */
 
     static unsigned long lastSave = 0;
+    static unsigned long lastOffsetChange = 0;
 
-    if ((millis() - lastSave) >= TIME_TO_SAVE) {
+    unsigned long currentMillis = millis();
+
+    if ((currentMillis - lastSave) >= TIME_TO_SAVE) {
         digitalWrite(LED_BUILTIN, HIGH);
 
-        lastSave = millis();
+        lastSave = currentMillis;
 
         EEPROM.put<uint32_t>(0, magicValue);
-        uint8_t offset = sizeof(uint32_t);
+
+        uint16_t offset;
+
+        offset = max(sizeof(uint32_t) + sizeof(uint16_t), eepromOffset);
+        eepromOffset = offset;
+
+        // Move eeprom offset if needed
+        if ((currentMillis - lastOffsetChange) >= EEPROM_OFFSET_CHANGE_TIME) {
+            lastOffsetChange = currentMillis;
+
+            if (++offset > EEPROM_MAX_OFFSET) {
+                offset = sizeof(uint32_t) + sizeof(uint16_t);
+            }
+
+            eepromOffset = offset;
+        }
+
+        EEPROM.put<uint16_t>(sizeof(uint32_t), offset);
 
         EEPROM.put<uint8_t>(offset, currentSelector);
         offset += sizeof(uint8_t);
@@ -230,7 +260,13 @@ void autoload() {
     uint8_t offset = sizeof(uint32_t);
 
     if (magic == magicValue) {
+        EEPROM.get<uint16_t>(offset, eepromOffset);
+        if (eepromOffset > EEPROM_MAX_OFFSET) goto exit;
+
+        offset = eepromOffset;
+
         EEPROM.get<uint8_t>(offset, (uint8_t&)currentSelector);
+        if ((uint8_t)currentSelector > SELECT_FADE) goto exit;
         offset += sizeof(uint8_t);
 
         EEPROM.get<unsigned long>(offset, fadeSpeed);
@@ -262,10 +298,18 @@ void autoload() {
         Serial.print("FadeSpeed: ");
         Serial.println(fadeSpeed);
 
+        Serial.print("EEPROM Offset: ");
+        Serial.println(eepromOffset);
+
         Serial.println("Saved light loaded");
+        return;
     } else {
         Serial.println("First turn on :)");
+        return;
     }
+
+exit:
+    Serial.println("Error reading EEPROM");
 }
 
 bool getNumFromChar(uint8_t& num, char charToConv) {
