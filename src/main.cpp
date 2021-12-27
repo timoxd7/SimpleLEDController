@@ -4,11 +4,19 @@
 #include "Ports.h"
 #include "Steroido.h"
 
+#define IMMEDIATE_START
+
 // ms it takes to change by one (255 * this to get time from 0% - 100% brightness)
 #define MS_PER_CHANGE 10
 
+// Preset the fade speed when entering fade. Will overwrite MS_PER_CHANGE if set
+#define FADE_SPEED_OVERWRITE 255
+
 // ms to wait after change to save it
 #define TIME_TO_SAVE 5000
+
+// Minimal value of the max of r/g/b in random fade (to keep brightness up)
+#define MIN_FOR_FADE 200
 
 uint8_t ports[] = {PIN_LED_RED, PIN_LED_GREEN, PIN_LED_BLUE};
 
@@ -24,7 +32,7 @@ unsigned long fadeSpeed = MS_PER_CHANGE;
 bool desiredReached = true;
 
 // For EEPROM
-const uint32_t magicValue = 0xAFFEFEFA;
+const uint32_t magicValue = 0xAFFEFEFE;
 
 // For up/down debounce
 DelayedSwitch upBtn;
@@ -106,7 +114,39 @@ void update() {
 }
 
 void calcFade() {
-    // -> not implemented yet
+    // If desired reached, calculate new random color
+
+    if (desiredReached) {
+        Serial.println("Desired reached, changing Color");
+
+        uint8_t maxVal = 0;
+        uint8_t maxIndex;
+        for (uint8_t i = 0; i < 3; ++i) {
+            uint8_t* currentVal = desiredValues + i;
+
+            *currentVal = random(256);
+
+            if (*currentVal >= maxVal) {
+                maxVal = *currentVal;
+                maxIndex = i;
+            }
+        }
+
+        if (maxVal < MIN_FOR_FADE) {
+            desiredValues[maxIndex] = MIN_FOR_FADE;
+        }
+
+        Serial.print("New color: ");
+
+        for (uint8_t i = 0; i < 3; ++i) {
+            Serial.print(desiredValues[i]);
+            Serial.write('\t');
+        }
+
+        Serial.write('\n');
+
+        desiredReached = false;
+    }
 }
 
 void currentIsDesired() {
@@ -118,6 +158,15 @@ void currentIsDesired() {
 }
 
 void autosave() {
+    /*
+        Saving (bytes, type, value):
+        4   uint32_t    magicValue
+        1   uint8_t     currentSelector
+        4   u long      fadeSpeed
+        3   uint8_t[3]  actualValues
+        3   uint8_t[3]  desiredValues
+    */
+
     static unsigned long lastSave = 0;
 
     if ((millis() - lastSave) >= TIME_TO_SAVE) {
@@ -131,6 +180,9 @@ void autosave() {
         EEPROM.put<uint8_t>(offset, currentSelector);
         offset += sizeof(uint8_t);
 
+        EEPROM.put<unsigned long>(offset, fadeSpeed);
+        offset += sizeof(unsigned long);
+
         for (uint8_t i = 0; i < 3; ++i) {
             EEPROM.put<uint8_t>(offset + i, actualValues[i]);
             EEPROM.put<uint8_t>(offset + 3 + i, desiredValues[i]);
@@ -139,6 +191,51 @@ void autosave() {
         Serial.println("Save");
 
         digitalWrite(LED_BUILTIN, LOW);
+    }
+}
+
+void autoload() {
+    // Read old values from EEPROM (see autosave)
+    uint32_t magic = 0;
+    EEPROM.get<uint32_t>(0, magic);
+    uint8_t offset = sizeof(uint32_t);
+
+    if (magic == magicValue) {
+        EEPROM.get<uint8_t>(offset, (uint8_t&)currentSelector);
+        offset += sizeof(uint8_t);
+
+        EEPROM.get<unsigned long>(offset, fadeSpeed);
+        offset += sizeof(unsigned long);
+
+        for (uint8_t i = 0; i < 3; ++i) {
+#ifdef IMMEDIATE_START
+            EEPROM.get<uint8_t>(offset + i, actualValues[i]);
+            Serial.print(actualValues[i]);
+            Serial.write('\t');
+#else
+            actualValues[i] = 0;
+#endif
+        }
+
+        Serial.write('\n');
+
+        offset += sizeof(uint8_t) * 3;
+
+        for (uint8_t i = 0; i < 3; ++i) {
+            EEPROM.get<uint8_t>(offset + i, desiredValues[i]);
+            Serial.print(desiredValues[i]);
+            Serial.write('\t');
+        }
+
+        Serial.print("\nSelector: ");
+        Serial.println(currentSelector);
+
+        Serial.print("FadeSpeed: ");
+        Serial.println(fadeSpeed);
+
+        Serial.println("Saved light loaded");
+    } else {
+        Serial.println("First turn on :)");
     }
 }
 
@@ -170,6 +267,14 @@ void manageSerial() {
                 case 'd':
                 case 'D':
                     printDesired = !printDesired;
+                    break;
+
+                case 'f':
+                case 'F':
+                    numIndex = 0;
+                    num = 0;
+                    commandIndex = SELECT_FADE;
+                    nextIsNum = true;
                     break;
 
                 case 'r':
@@ -206,13 +311,25 @@ void manageSerial() {
 
                             if (++numIndex == 3) {
                                 nextIsNum = false;
-                                desiredValues[commandIndex] = num;
                                 desiredReached = false;
 
-                                Serial.print("Set ");
-                                Serial.print(commandIndex);
-                                Serial.print(" to ");
-                                Serial.println(num);
+                                if (commandIndex == SELECT_FADE) {
+                                    currentSelector = SELECT_FADE;
+
+                                    fadeSpeed = num;
+
+                                    Serial.print("Set fadeSpeed to ");
+                                    Serial.println(num);
+                                } else {
+                                    currentSelector = (selector_t)commandIndex;
+
+                                    desiredValues[commandIndex] = num;
+
+                                    Serial.print("Set ");
+                                    Serial.print(commandIndex);
+                                    Serial.print(" to ");
+                                    Serial.println(num);
+                                }
                             }
                         } else {
                             Serial.println("Not a number (0 - 9)!");
@@ -250,37 +367,7 @@ void setup() {
     pinMode(PIN_BUTTON_UP, INPUT_PULLUP);
     pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP);
 
-    // Read old values from EEPROM
-    uint32_t magic = 0;
-    EEPROM.get<uint32_t>(0, magic);
-    uint8_t offset = sizeof(uint32_t);
-
-    if (magic == magicValue) {
-        EEPROM.get<uint8_t>(offset, (uint8_t&)currentSelector);
-        offset += sizeof(uint8_t);
-
-        for (uint8_t i = 0; i < 3; ++i) {
-            EEPROM.get<uint8_t>(offset + i, actualValues[i]);
-            Serial.print(actualValues[i]);
-            Serial.write('\t');
-        }
-
-        offset += 3;
-        Serial.write('\n');
-
-        for (uint8_t i = 0; i < 3; ++i) {
-            EEPROM.get<uint8_t>(offset + i, desiredValues[i]);
-            Serial.print(desiredValues[i]);
-            Serial.write('\t');
-        }
-
-        Serial.print("\nSelector: ");
-        Serial.println(currentSelector);
-
-        Serial.println("Saved light loaded");
-    } else {
-        Serial.println("First turn on :)");
-    }
+    autoload();
 
     desiredReached = true;
     for (uint8_t i = 0; i < 3; ++i) {
@@ -311,7 +398,16 @@ void loop() {
     } else if (digitalRead(PIN_BUTTON_BLUE) == LOW) {
         currentSelector = SELECT_BLUE;
     } else if (digitalRead(PIN_BUTTON_FADE) == LOW) {
-        currentSelector = SELECT_FADE;
+#ifdef FADE_SPEED_OVERWRITE
+        if (currentSelector != SELECT_FADE) {
+#endif
+            // -> Entering fade
+            currentSelector = SELECT_FADE;
+
+#ifdef FADE_SPEED_OVERWRITE
+            fadeSpeed = FADE_SPEED_OVERWRITE;
+#endif
+        }
     }
 
     // Debounce up/down
