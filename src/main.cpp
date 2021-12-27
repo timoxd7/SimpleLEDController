@@ -4,6 +4,7 @@
 #include "Ports.h"
 #include "Steroido.h"
 
+// Start with last color immediately, otherwise slowly up to desired value
 #define IMMEDIATE_START
 
 // ms it takes to change by one (255 * this to get time from 0% - 100% brightness)
@@ -15,8 +16,14 @@
 // ms to wait after change to save it
 #define TIME_TO_SAVE 5000
 
+// Set if a predefined color list should be used or a random Color should be generated each
+// change
+//#define USE_RANDOM_FADE_STD
+
 // Minimal value of the max of r/g/b in random fade (to keep brightness up)
 #define MIN_FOR_FADE 200
+
+#include "Colormap.h"
 
 uint8_t ports[] = {PIN_LED_RED, PIN_LED_GREEN, PIN_LED_BLUE};
 
@@ -31,12 +38,19 @@ unsigned long unusedMillis = 0;
 unsigned long fadeSpeed = MS_PER_CHANGE;
 bool desiredReached = true;
 
+#ifdef USE_RANDOM_FADE_STD
+bool useRandom = true;
+#else
+bool useRandom = false;
+#endif
+
 // For EEPROM
 const uint32_t magicValue = 0xAFFEFEFE;
 
 // For up/down debounce
 DelayedSwitch upBtn;
 DelayedSwitch downBtn;
+DelayedSwitch fadeBtn;
 
 enum selector_t : uint8_t {
     SELECT_RED = 0,
@@ -114,26 +128,41 @@ void update() {
 }
 
 void calcFade() {
-    // If desired reached, calculate new random color
+    // If desired reached, calculate new color
 
     if (desiredReached) {
         Serial.println("Desired reached, changing Color");
 
-        uint8_t maxVal = 0;
-        uint8_t maxIndex;
-        for (uint8_t i = 0; i < 3; ++i) {
-            uint8_t* currentVal = desiredValues + i;
+        if (useRandom) {
+            // Get random color
+            uint8_t maxVal = 0;
+            uint8_t maxIndex;
+            for (uint8_t i = 0; i < 3; ++i) {
+                uint8_t* currentVal = desiredValues + i;
 
-            *currentVal = random(256);
+                *currentVal = random(256);
 
-            if (*currentVal >= maxVal) {
-                maxVal = *currentVal;
-                maxIndex = i;
+                if (*currentVal >= maxVal) {
+                    maxVal = *currentVal;
+                    maxIndex = i;
+                }
             }
-        }
 
-        if (maxVal < MIN_FOR_FADE) {
-            desiredValues[maxIndex] = MIN_FOR_FADE;
+            // Check if the max color is lower then min
+            if (maxVal < MIN_FOR_FADE) {
+                desiredValues[maxIndex] = MIN_FOR_FADE;
+            }
+
+        } else {
+            static uint16_t nextIndex = 0;
+
+            for (uint8_t i = 0; i < 3; ++i) {
+                desiredValues[i] = colorMap[nextIndex][i];
+            }
+
+            if (++nextIndex == (sizeof(colorMap) / 3 * sizeof(uint8_t))) {
+                nextIndex = 0;
+            }
         }
 
         Serial.print("New color: ");
@@ -269,6 +298,19 @@ void manageSerial() {
                     printDesired = !printDesired;
                     break;
 
+                case 'x':
+                case 'X':
+                    useRandom = !useRandom;
+
+                    if (useRandom) {
+                        Serial.println("Random enabled");
+                    } else {
+                        Serial.println("Random disabled");
+                    }
+
+                    currentSelector = SELECT_FADE;
+                    break;
+
                 case 'f':
                 case 'F':
                     numIndex = 0;
@@ -351,6 +393,8 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH);
 
+    randomSeed(analogRead(0));
+
     Serial.begin(115200);
 
     // LEDs
@@ -379,17 +423,23 @@ void setup() {
 
     upBtn.setEnableTime(100);
     downBtn.setEnableTime(100);
+    fadeBtn.setEnableTime(100);
     upBtn.setDisableTime(50);
     downBtn.setDisableTime(50);
+    fadeBtn.setDisableTime(50);
 
     digitalWrite(LED_BUILTIN, LOW);
 }
 
 // Vars for loop
-bool upState;
-bool downState;
+bool upState = false;
+bool downState = false;
+bool fadeBtnState = false;
 
 void loop() {
+    bool oldFadeState = fadeBtnState;
+    fadeBtnState = fadeBtn.set(digitalRead(PIN_BUTTON_FADE) == LOW);
+
     // First, set mode by button pressed
     if (digitalRead(PIN_BUTTON_RED) == LOW) {
         currentSelector = SELECT_RED;
@@ -397,16 +447,18 @@ void loop() {
         currentSelector = SELECT_GREEN;
     } else if (digitalRead(PIN_BUTTON_BLUE) == LOW) {
         currentSelector = SELECT_BLUE;
-    } else if (digitalRead(PIN_BUTTON_FADE) == LOW) {
-#ifdef FADE_SPEED_OVERWRITE
+    } else if (fadeBtnState && (fadeBtnState != oldFadeState)) {
+        // -> only once per click
+
         if (currentSelector != SELECT_FADE) {
-#endif
             // -> Entering fade
             currentSelector = SELECT_FADE;
 
 #ifdef FADE_SPEED_OVERWRITE
             fadeSpeed = FADE_SPEED_OVERWRITE;
 #endif
+        } else {
+            useRandom = !useRandom;
         }
     }
 
